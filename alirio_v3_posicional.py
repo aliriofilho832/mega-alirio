@@ -4,7 +4,6 @@ import random
 import json
 import os
 from itertools import combinations
-from datetime import datetime
 from io import BytesIO
 from math import comb
 
@@ -13,7 +12,9 @@ from math import comb
 # ============================
 APP_VERSAO = "Alirio v3 (posicional)"
 APP_NOME = f"Gerador — {APP_VERSAO}"
-# Dica: você pode trocar para os.getenv("APP_PASSWORD", "2802") para usar senha em variável de ambiente no Render
+
+# Se quiser usar variável de ambiente no Render, troque pela linha abaixo:
+# SENHA_CORRETA = os.getenv("APP_PASSWORD", "2802")
 SENHA_CORRETA = "2802"
 
 st.set_page_config(page_title=APP_NOME, page_icon="🎯", layout="centered")
@@ -28,6 +29,7 @@ EXIGE_ACIMA_31 = True
 # FUNÇÕES UTILITÁRIAS
 # ============================
 def ler_ultimo_resultado_caixa():
+    """Busca o último resultado na API da CAIXA."""
     import urllib.request
     url = "https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena"
     headers = {
@@ -48,6 +50,7 @@ def ler_ultimo_resultado_caixa():
 
 # ---------- Faixas por posição dinâmicas ----------
 def pos_ranges_for_m(m: int):
+    """Gera faixas por posição quando m > 6 (mais elásticas)."""
     ranges = {}
     for i in range(1, 7):
         target = int(round(i * 60 / (m + 1)))
@@ -57,6 +60,7 @@ def pos_ranges_for_m(m: int):
     return ranges
 
 def valida_posicoes_first6(nums, m):
+    """Valida as 6 primeiras posições do conjunto ordenado."""
     s = sorted(nums)
     if len(s) < 6:
         return False
@@ -69,12 +73,6 @@ def valida_posicoes_first6(nums, m):
 
 # --- Validação posicional (leve): 1ª ∈ [1,9] e 2ª ∈ [10,19] ---
 def valida_primeiras_duas_posicoes(nums):
-    """
-    Verifica SOMENTE as duas primeiras posições (menores valores) do conjunto:
-      - 1ª posição: 1..9
-      - 2ª posição: 10..19
-    Retorna True/False.
-    """
     s = sorted(nums)
     if len(s) < 2:
         return False
@@ -157,6 +155,7 @@ def anti_crowd_filters(nums, m):
     )
 
 def inclui_atrasado_se_preciso(nums, ult=set(), intervalo=(0, 2), atrasados=set(), p_inc=0.25, m=6):
+    """Com p_inc, tenta substituir 1 dezena por um atrasado, mantendo filtros."""
     if not atrasados or p_inc <= 0:
         return nums
     if random.random() <= p_inc:
@@ -199,25 +198,22 @@ def gera_candidato(tam_jogo=6, ult=set(), intervalo=(0, 2), atrasados=set(), p_i
     for _ in range(4000):
         nums = sorted(random.sample(range(1, 61), tam_jogo))
 
-        # --- NOVO: trava posicional 1ª e 2ª (leve) ---
-        if trava_1e2:
-            if not valida_primeiras_duas_posicoes(nums):
-                continue
+        # Travas posicionais (leves)
+        if trava_1e2 and not valida_primeiras_duas_posicoes(nums):
+            continue
 
-        # Validação posicional original (mantida)
+        # Filtros
         if not valida_posicoes_first6(nums, tam_jogo):
             continue
-        # Filtros anti-crowd (mantidos)
         if not anti_crowd_filters(nums, tam_jogo):
             continue
-        # Repetição com o último (mantido)
         if not repete_ultimo_ok(nums, intervalo, ult):
             continue
 
-        # Tentativa de incluir atrasado (se aplicável)
+        # Tentativa de incluir atrasado
         nums = inclui_atrasado_se_preciso(nums, ult, intervalo, atrasados, p_inc, m=tam_jogo)
 
-        # Revalida pós-inclusão (mantido)
+        # Revalida
         if not repete_ultimo_ok(nums, intervalo, ult):
             continue
         if not anti_crowd_filters(nums, tam_jogo):
@@ -306,7 +302,9 @@ def excel_bytes_duas_abas(df_jogos: pd.DataFrame, resumo_df: pd.DataFrame):
         resumo_df.to_excel(w, index=False, sheet_name="RESUMO")
     return buf.getvalue()
 
-# ---------- Interface ----------
+# ============================
+# INTERFACE
+# ============================
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
 
@@ -329,35 +327,82 @@ with st.expander("⚙️ Parâmetros", expanded=True):
     qtd_jogos = st.number_input("Quantidade de jogos", 1, 30, 6)
 
     usar_ultimo = st.checkbox("Usar último resultado da CAIXA", True)
+
+    # Entrada manual do último
+    ultimo_manual = ""
+    if not usar_ultimo:
+        ultimo_manual = st.text_input("Digite o último resultado manualmente (ex: 05 14 20 33 42 56)")
+
     faixa_min = st.number_input("Repetição mínima", 0, 6, 0)
     faixa_max = st.number_input("Repetição máxima", 0, 6, 2)
 
     atrasados_str = st.text_input("Atrasados (ex: 7,28,39)")
-
     prob_atrasado = st.slider("Prob. de incluir atrasado", 0.0, 1.0, 0.25, 0.05)
+
     seed = st.number_input("Semente (0 = aleatório)", 0, 999999, 0)
     simular = st.checkbox("Rodar simulação Monte Carlo", False)
 
-# --- NOVO: Regras posicionais (leves) ---
 with st.expander("📊 Regras posicionais (leves)", expanded=False):
     usar_trava_1e2 = st.checkbox(
         "Travar 1ª posição em 1–9 e 2ª posição em 10–19",
-        True  # ligado por padrão, conforme análise
+        True  # ligado por padrão
     )
     st.caption("Sugestão: manter ligado para guiar o gerador sem travar o pool. Funciona para qualquer tamanho de jogo.")
 
-if st.button("🚀 GERAR JOGOS", use_container_width=True):
+# ----------------- BOTÕES -----------------
+col1, col2 = st.columns(2)
 
+with col1:
+    gerar = st.button("🚀 GERAR JOGOS", use_container_width=True)
+with col2:
+    gerar_excel = st.button("📄 Gerar Excel (.xlsx)", use_container_width=True)
+
+# ----------------- LÓGICA PRINCIPAL -----------------
+def obter_ultimo(usar_ultimo, ultimo_manual_str):
+    """Retorna set() com 6 dezenas do último resultado (API ou Manual)."""
+    if usar_ultimo:
+        return ler_ultimo_resultado_caixa()
+    # Manual
+    if ultimo_manual_str.strip():
+        try:
+            numeros = (
+                ultimo_manual_str.replace(",", " ")
+                                 .replace("-", " ")
+                                 .split()
+            )
+            u = {int(x) for x in numeros}
+            if len(u) != 6 or not all(1 <= x <= 60 for x in u):
+                st.warning("Digite exatamente 6 dezenas válidas (1..60).")
+                return set()
+            return u
+        except:
+            st.warning("Não foi possível interpretar o último resultado manual.")
+            return set()
+    return set()
+
+# Mantém resultados do último clique para permitir gerar Excel depois
+if "ultimo_jogos_df" not in st.session_state:
+    st.session_state.ultimo_jogos_df = None
+if "ultimo_resumo_df" not in st.session_state:
+    st.session_state.ultimo_resumo_df = None
+
+if gerar or gerar_excel:
     if seed > 0:
         random.seed(seed)
 
-    ult = ler_ultimo_resultado_caixa() if usar_ultimo else set()
+    # Último: API ou Manual
+    ult = obter_ultimo(usar_ultimo, ultimo_manual)
 
     if usar_ultimo:
         if ult:
-            st.success(f"Último resultado: {sorted(ult)}")
+            st.success(f"Último resultado (API): {sorted(ult)}")
         else:
-            st.warning("Não foi possível obter o último resultado.")
+            st.warning("Não foi possível obter o último resultado via API.")
+    else:
+        if ult:
+            st.success(f"Último resultado (manual): {sorted(ult)}")
+        else:
+            st.info("Usando sem referência de último resultado.")
 
     intervalo = (min(faixa_min, faixa_max), max(faixa_min, faixa_max))
 
@@ -368,6 +413,7 @@ if st.button("🚀 GERAR JOGOS", use_container_width=True):
         except:
             st.warning("Não foi possível interpretar atrasados.")
 
+    # Se o clique foi para Gerar Jogos (ou também Gerar Excel, pois precisa dos jogos)
     try:
         jogos = gerar_n_jogos(
             n=qtd_jogos,
@@ -388,26 +434,18 @@ if st.button("🚀 GERAR JOGOS", use_container_width=True):
 
     pares_u, trincas_u = cobertura_metricas(jogos)
     max_pairs, max_trincs = cobertura_teorica_max(qtd_jogos, tam_jogo)
-
-    st.write(f"**Cobertura:** {pares_u} pares únicos (máx={max_pairs}) — "
-             f"{trincas_u} trincas únicas (máx={max_trincs})")
+    st.write(f"**Cobertura:** {pares_u} pares únicos (máx={max_pairs}) — {trincas_u} trincas únicas (máx={max_trincs})")
 
     if simular:
         st.info("Simulando, aguarde...")
         sim = simula_sorteios_multiplos(jogos)
         st.json(sim)
 
+    # DataFrames
     df = pd.DataFrame([
         {"Jogo": i + 1, **{f"N{k}": f"{n:02d}" for k, n in enumerate(j, start=1)}}
         for i, j in enumerate(jogos)
     ])
-
-    st.download_button(
-        "Baixar CSV",
-        df.to_csv(index=False).encode("utf-8"),
-        file_name="jogos.csv"
-    )
-
     resumo_df = pd.DataFrame([{
         "Tamanho": tam_jogo,
         "Quantidade": qtd_jogos,
@@ -415,10 +453,4 @@ if st.button("🚀 GERAR JOGOS", use_container_width=True):
         "Trincas_Unicas": trincas_u
     }])
 
-    excel_bytes = excel_bytes_duas_abas(df, resumo_df)
-
-    st.download_button(
-        "Baixar Excel (.xlsx)",
-        excel_bytes,
-        file_name="alirio_v3_posicional.xlsx"
-    )
+    # Guarda para possível Excel
