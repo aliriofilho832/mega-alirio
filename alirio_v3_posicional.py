@@ -13,9 +13,8 @@ from math import comb
 APP_VERSAO = "Alirio v3 (posicional)"
 APP_NOME = f"Gerador — {APP_VERSAO}"
 
-# Se quiser usar variável de ambiente no Render, troque pela linha abaixo:
-# SENHA_CORRETA = os.getenv("APP_PASSWORD", "2802")
-SENHA_CORRETA = "2802"
+# Senha: usa secrets ou variável de ambiente (fallback padrão 2802)
+SENHA_CORRETA = st.secrets.get("APP_PASSWORD", os.getenv("APP_PASSWORD", "2802"))
 
 st.set_page_config(page_title=APP_NOME, page_icon="🎯", layout="centered")
 
@@ -28,6 +27,7 @@ EXIGE_ACIMA_31 = True
 # ============================
 # FUNÇÕES UTILITÁRIAS
 # ============================
+@st.cache_data(show_spinner=False, ttl=60)
 def ler_ultimo_resultado_caixa():
     """Busca o último resultado na API da CAIXA."""
     import urllib.request
@@ -45,7 +45,7 @@ def ler_ultimo_resultado_caixa():
             dezenas = obj.get("listaDezenas") or obj.get("listaDezenasOrdemSorteio")
             nums = {int(x) for x in dezenas} if dezenas else set()
             return nums if len(nums) == 6 else set()
-    except:
+    except Exception:
         return set()
 
 # ---------- Faixas por posição dinâmicas ----------
@@ -60,15 +60,28 @@ def pos_ranges_for_m(m: int):
     return ranges
 
 def valida_posicoes_first6(nums, m):
-    """Valida as 6 primeiras posições do conjunto ordenado."""
+    """
+    Valida as 6 primeiras posições do conjunto ordenado, com uma regra especial:
+    - 1ª posição: apenas exige estar entre 1 e 9 (livre dentro desse intervalo),
+      sem aplicar POS_RANGES nem faixas dinâmicas para a 1ª.
+    - 2ª..6ª posições: seguem normalmente as faixas POS_RANGES (m == 6) ou dinâmicas (m > 6).
+    """
     s = sorted(nums)
     if len(s) < 6:
         return False
+
+    # 1) Regra especial da 1ª posição: livre dentro de 1..9
+    if not (1 <= s[0] <= 9):
+        return False
+
+    # 2) Para as posições 2..6, mantém a lógica original de faixas
     faixas = POS_RANGES if m == 6 else pos_ranges_for_m(m)
-    for i, x in enumerate(s[:6], start=1):
+
+    for i, x in enumerate(s[1:6], start=2):  # começa da 2ª posição
         lo, hi = faixas[i]
         if not (lo <= x <= hi):
             return False
+
     return True
 
 # --- Validação posicional (leve): 1ª ∈ [1,9] e 2ª ∈ [10,19] ---
@@ -351,7 +364,6 @@ with st.expander("📊 Regras posicionais (leves)", expanded=False):
 
 # ----------------- BOTÕES -----------------
 col1, col2 = st.columns(2)
-
 with col1:
     gerar = st.button("🚀 GERAR JOGOS", use_container_width=True)
 with col2:
@@ -375,7 +387,7 @@ def obter_ultimo(usar_ultimo, ultimo_manual_str):
                 st.warning("Digite exatamente 6 dezenas válidas (1..60).")
                 return set()
             return u
-        except:
+        except Exception:
             st.warning("Não foi possível interpretar o último resultado manual.")
             return set()
     return set()
@@ -386,12 +398,15 @@ if "ultimo_jogos_df" not in st.session_state:
 if "ultimo_resumo_df" not in st.session_state:
     st.session_state.ultimo_resumo_df = None
 
-if gerar or gerar_excel:
+def processar_geracao_e_mostrar():
+    # Seed e mensagem
     if seed > 0:
         random.seed(seed)
+        st.info(f"Semente definida: {seed}")
 
     # Último: API ou Manual
-    ult = obter_ultimo(usar_ultimo, ultimo_manual)
+    with st.spinner("Consultando último resultado..."):
+        ult = obter_ultimo(usar_ultimo, ultimo_manual)
 
     if usar_ultimo:
         if ult:
@@ -409,24 +424,24 @@ if gerar or gerar_excel:
     atrasados = set()
     if atrasados_str.strip():
         try:
-            atrasados = {int(x.strip()) for x in atrasados_str.split(",")}
-        except:
+            atrasados = {int(x.strip()) for x in atrasados_str.split(",") if x.strip()}
+        except Exception:
             st.warning("Não foi possível interpretar atrasados.")
 
-    # Se o clique foi para Gerar Jogos (ou também Gerar Excel, pois precisa dos jogos)
     try:
-        jogos = gerar_n_jogos(
-            n=qtd_jogos,
-            tam_jogo=tam_jogo,
-            ult=ult,
-            intervalo=intervalo,
-            atrasados=atrasados,
-            p_inc=prob_atrasado,
-            trava_1e2=usar_trava_1e2,
-        )
+        with st.spinner("Gerando jogos e otimizando cobertura..."):
+            jogos = gerar_n_jogos(
+                n=qtd_jogos,
+                tam_jogo=tam_jogo,
+                ult=ult,
+                intervalo=intervalo,
+                atrasados=atrasados,
+                p_inc=prob_atrasado,
+                trava_1e2=usar_trava_1e2,
+            )
     except RuntimeError as e:
         st.error(str(e))
-        st.stop()
+        return None, None, None
 
     st.subheader("🎟 Jogos Gerados")
     for i, j in enumerate(jogos, 1):
@@ -437,8 +452,8 @@ if gerar or gerar_excel:
     st.write(f"**Cobertura:** {pares_u} pares únicos (máx={max_pairs}) — {trincas_u} trincas únicas (máx={max_trincs})")
 
     if simular:
-        st.info("Simulando, aguarde...")
-        sim = simula_sorteios_multiplos(jogos)
+        with st.spinner("Rodando simulação Monte Carlo..."):
+            sim = simula_sorteios_multiplos(jogos)
         st.json(sim)
 
     # DataFrames
@@ -454,3 +469,34 @@ if gerar or gerar_excel:
     }])
 
     # Guarda para possível Excel
+    st.session_state.ultimo_jogos_df = df
+    st.session_state.ultimo_resumo_df = resumo_df
+
+    return df, resumo_df, jogos
+
+# Quando clicar em GERAR ou GERAR EXCEL (ambos precisam gerar os jogos)
+if gerar or gerar_excel:
+    df, resumo_df, jogos = processar_geracao_e_mostrar()
+
+    if df is not None:
+        # Botão de download sempre que houver resultado gerado
+        bytes_xlsx = excel_bytes_duas_abas(df, resumo_df)
+        st.download_button(
+            label="⬇️ Baixar Excel (.xlsx)",
+            data=bytes_xlsx,
+            file_name=f"megasena_{tam_jogo}x{qtd_jogos}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+# Caso o usuário só queira baixar depois, sem regenerar
+elif st.session_state.ultimo_jogos_df is not None and st.session_state.ultimo_resumo_df is not None:
+    st.info("Você tem jogos na memória desta sessão. Pode baixar o Excel sem regenerar.")
+    bytes_xlsx = excel_bytes_duas_abas(st.session_state.ultimo_jogos_df, st.session_state.ultimo_resumo_df)
+    st.download_button(
+        label="⬇️ Baixar Excel (.xlsx) (última geração)",
+        data=bytes_xlsx,
+        file_name="megasena_ultima_geracao.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
